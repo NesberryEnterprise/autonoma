@@ -1,0 +1,32 @@
+# syntax=docker/dockerfile:1
+# Multi-stage build for @autonoma/ui — builds the Vite SPA from monorepo source,
+# then serves the static dist/ with nginx (mirrors the stock apps/ui/Dockerfile runtime).
+# Railway: set this service's Dockerfile path to apps/ui/Dockerfile.railway,
+# build context = repo root.
+# IMPORTANT: Vite inlines VITE_* env at BUILD time, so VITE_API_URL must be set
+# as a Railway *build* variable pointing at the deployed api service URL.
+
+FROM node:24-alpine AS base
+RUN apk add --no-cache libc6-compat
+RUN corepack enable
+WORKDIR /repo
+
+# ---------- build stage ----------
+FROM base AS build
+# VITE_* must be present at build time (Vite bakes them into the bundle)
+ARG VITE_API_URL
+ARG VITE_INTERNAL_DOMAIN=autonoma.app
+ENV VITE_API_URL=$VITE_API_URL
+ENV VITE_INTERNAL_DOMAIN=$VITE_INTERNAL_DOMAIN
+COPY . .
+RUN --mount=type=cache,id=pnpm,target=/root/.local/share/pnpm/store \
+    pnpm install --frozen-lockfile
+# Build @autonoma/ui and its workspace deps
+RUN pnpm turbo run build --filter=@autonoma/ui...
+
+# ---------- runtime stage (nginx static) ----------
+FROM nginx:alpine AS runtime
+COPY --from=build /repo/apps/ui/nginx.conf.template /etc/nginx/templates/default.conf.template
+COPY --from=build /repo/apps/ui/dist/ /usr/share/nginx/html/
+EXPOSE 3000
+ENV NGINX_ENVSUBST_FILTER=API_UPSTREAM

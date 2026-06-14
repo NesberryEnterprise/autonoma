@@ -1,0 +1,35 @@
+# syntax=docker/dockerfile:1
+# Multi-stage build for @autonoma/api — builds the pnpm/Turborepo monorepo
+# FROM SOURCE (the stock apps/api/Dockerfile only packages a pre-built dist/).
+# Railway: set this service's Dockerfile path to apps/api/Dockerfile.railway
+# and the build context / root to the repository root.
+
+FROM node:24-alpine AS base
+RUN apk add --no-cache libc6-compat
+RUN corepack enable
+WORKDIR /repo
+
+# ---------- build stage ----------
+FROM base AS build
+# Copy the whole monorepo (pnpm workspace needs root manifests + all packages)
+COPY . .
+# Install ALL workspace deps (frozen to the committed lockfile)
+RUN --mount=type=cache,id=pnpm,target=/root/.local/share/pnpm/store \
+    pnpm install --frozen-lockfile
+# Generate the Prisma client (packages/db) before building the API
+RUN pnpm db:generate
+# Build @autonoma/api and everything it depends on (turbo resolves the graph)
+RUN pnpm turbo run build --filter=@autonoma/api...
+# Produce a self-contained, prod-only deployable of just the api package
+RUN pnpm --filter=@autonoma/api deploy --prod /out
+
+# ---------- runtime stage ----------
+FROM base AS runtime
+ENV NODE_ENV=production
+WORKDIR /app
+COPY --from=build /out ./
+# sharp is a native dep the stock Dockerfile installs at runtime for alpine
+RUN npm install sharp
+EXPOSE 4000
+USER node
+CMD ["node", "--enable-source-maps", "dist/index.js"]
